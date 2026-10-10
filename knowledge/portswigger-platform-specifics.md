@@ -111,12 +111,12 @@ conn_reuse "<lab>/" --send-str 'GET / HTTP/1.1\r\nHost: <lab>\r\n\r\n'   -> 302 
 三件事同构:**走私一条"未完成"的请求 -> 下一个落在同一后端连接上的请求的字节被吞进它的 body/headers**。
 用 `conn_reuse --cl-te`(前端 CL、后端 TE),走私请求沿用完整头 + 半截 body(或半截头块)。
 
-- **捕获下一个用户的请求**([[lab-capture-other-users-requests]]):目标 = 公开评论。
+- **捕获下一个用户的请求**(通用形):目标面 = 公开存储型载体(评论/帖子)。
   走私 `POST /post/comment`(**带攻击者自己的 session+csrf**),`comment=` 结尾,`CL = body.len()+deficit`;
   受害者的请求字节(含 `Cookie: session=<victim>`)落进 `comment` -> 存成评论 -> 读页取 session。
   - **触发**:lab 的 victim 只在"你发若干 POST"后才动一次;`race_send --method POST --form x=y --n 4` 做触发,`nap ~7` 后读。
   - **deficit 调参**:必须 ≤ victim 请求头块长度(Chrome victim 实测 ~815B)。750 截到 `secret=`,815 才含完整 `session=`;过大 -> 后端苦等 -> 前端 `500 Communication timed out`。
-- **揭示前端追加头**([[lab-reveal-front-end-request-rewriting]]):目标 = 搜索回显。
+- **揭示前端追加头**(通用形):目标面 = 请求回显位(搜索结果页)。
   走私未完成的 `POST /`(body=`search=`),前端随后转发的下一请求(含前端追加头)落进 `search` -> `<h1>...for 'GET / HTTP/1.1\r\nX-<rand>-Ip: <ip>\r\nHost...'</h1>`。
   - 头**加在请求行之后、Host 之前** -> deficit ~40 即可见头名。收口:把该头以 `127.0.0.1` 塞进走私的 `GET /admin`
     (前端直连自带同名头会 `400 Duplicate header names are not allowed`,只能走私);`/admin/delete?username=carlos` -> 302。
@@ -283,6 +283,10 @@ h2_req <url> --method HEAD --path /admin \
 ## Links
 
 - evidences: [[academy-edge-lab-cookie-gate]]
-## 平台反作弊实例锁(2026-10-10 实证)
+## 平台反作弊实例锁(flawed-parsing 单题级实证,2026-10-10)
 
 - 自供 `_lab` cookie 触发 `400 Too Nosy`(「Tampering with the _lab cookie is not required…」);边缘把 Host 段锁为实例名 allowlist(含 absolute-form 请求行);四旁路(转发头/重复头/h2 伪头/连接态)实测关闭——Host 变体类实验不携带 `_lab` 即可正常回包。
+
+## 0.CL 真原语形(2026-10-11 实战纠偏)
+
+- Expect 型 0.CL 已被否证(前端照常消费声明的体);公开真原语=畸变 `Content-Length : N`(名内空格)× early-response gadget × 0.CL→CL.0 双失步的组合,按帧铸成可直接喷发;落点差分(切片 404 未现)是残余问题,原语本身成立。
