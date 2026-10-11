@@ -45,6 +45,7 @@ cookies、lab_alert、page_snapshot、page_interact、reqseq 等已升内置)。
 | `mut_oracle.rs` | 竞态半构造变异 oracle:模板({I}/{M} 占位)Barrier 齐发 N 对 + 串行基线,报串线 marker/差分簇/谓词命中,判半构造行读面可见性 | 件先行专场(kimi Swarm 铸) |
 | `duphost_probe.rs` | 双 Host 表达探针:单连接发两个可配置头,五类判定(rejected-400/first-wins/second-wins/both-reflected/other),--repeat 测稳定性 | 件先行专场(kimi Swarm 铸) |
 | `burp_interp.rs` | 拦截代理语义(客户端侧重放,非 TLS 终止):--req 原请求 + set/drop/replace/set-body 改写规则 + jar,--follow 给整链 | 件先行专场(kimi Swarm 铸) |
+| `targeted_scan.rs` | 定向注入点扫描:模板(--req,{HOST} + 恰好一个 §INJ§ 注入点)×载荷表逐发,自动重算 Content-Length(TE 帧面不碰),收 status/体长/耗时与基线对比分桶(状态翻转/长度越带/耗时尾部),同因同值归簇 | 件先行二发(kimi Swarm 铸,H-2 复盘件差) |
 
 检索:语义面走 zg(zvec-grep,fts+vector 混合);已升内置的浏览器件
 (lab_alert/page_snapshot/page_interact/reqseq+browse/cookies)在产品 catalog。
