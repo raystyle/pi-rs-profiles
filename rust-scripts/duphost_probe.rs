@@ -1,9 +1,9 @@
 #!/usr/bin/env rust-script
 //! name: duphost_probe
-//! description: Duplicate-Host expression probe - fire ONE raw request carrying two caller-defined header lines (--h1/--h2, typically two Host headers) down a single TCP/TLS connection, read the whole response, and classify how the edge handled the duplicate: rejected-400 (400 whose text says duplicate), first-wins / second-wins (exactly one value reflected back), both-reflected (both values reflected; only emitted when a --reflect canary is embedded via the {REFLECT} token so the verdict cannot false-positive on short values), or other (raw response head plus the first 400 body bytes attached). --repeat N re-fires on fresh connections and reports verdict stability, making this the prior test for ambiguous-request cache poisoning: can the client even express two Hosts, and which one does the edge keep.
+//! description: 双 Host 表达探针(重复头表达前置判) - 单条 TCP/TLS 连接上发一份携带两条调用方自定义头行(--h1/--h2,典型即两个 Host 头)的原始请求,读完整响应并判定边缘如何处置重复头:rejected-400(400 且文本言 duplicate)/ first-wins / second-wins(恰一个值被回显)/ both-reflected(两值都被回显;仅在经 {REFLECT} 令牌嵌入 --reflect 金丝雀时才判此型,短值不会假阳)/ other(附原始响应头与体前 400 字节)。--repeat N 换新连接复打并报告判定稳定性,作为 ambiguous-request 缓存投毒的前置测试:客户端到底能不能表达两个 Host,边缘留哪个。
 //! version: 1.0.0
 //! args: <url> --h1 'Host: a' --h2 'Host: b' [--path /] [--reflect STR] [--repeat N] [--read-ms N] [--selftest]
-//! keywords: 漏洞猎手套件, duplicate-host, host-header, ambiguous-request, cache-poisoning, prior
+//! keywords: 漏洞猎手套件, duplicate-host, host-header, 双头, 重复头, 表达探针, ambiguous-request, cache-poisoning, prior, first-wins, second-wins
 //!
 //! ```cargo
 //! [dependencies]
