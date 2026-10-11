@@ -18,7 +18,9 @@ title: 竞态族:单包并发与状态窗口
 
 | 子型 | 判型特征 | 手法方向 | 实录 |
 |---|---|---|---|
-| 单端点竞态 | 同端点多请求、会话内单令牌 | 齐发改邮箱,争会话令牌最后写者 | [[lab-race-conditions-single-endpoint]] |
+| 单端点竞态 | 同端点多请求、会话内单令牌 | confirm-vs-change TOCTOU:同一单包里并放「确认请求」与「change 请求」,确认腿校验通过后读到并发写入的 pending 值并生效(实测 5 号流 200 + 7 号流 302);「齐发改邮箱争最后写者」是泄漏路线非正解 | [[lab-race-conditions-single-endpoint]] |
+| 优惠券叠加 | 结算端接受多券并发入账 | 写侧洪泛:同端点单包多流以量补齐窗口 | [[lab-race-conditions-limit-overrun]] |
+| 限流键旋转 | 限流按键计数、键可被变体旋转 | 大小写旋转换限流键,一轮 15 形;或登录面末字节同放 30 流齐发(流 17 回 302 即中) | [[lab-race-conditions-bypassing-rate-limits]] |
 | 多端点竞态 | 校验与结算各在一端点 | 结算窗口塞入夹克(需单包) | [[lab-race-conditions-multi-endpoint]] |
 | 时间敏感令牌 | token 随时间/按用户变 | 由已知 token 反推派生式(含 salt 难) | [[lab-race-conditions-exploiting-time-sensitive-vulnerabilities]] |
 | 部分构造 | 注册与确认分离 | 穿过 INSERT→UPDATE 窗口用半构造对象(实测 `WHERE token = ?`;真单包 4 种排布共 ~70 confirm 全 miss ⇒ 半构造行对确认腿不可见/不匹配,NULL 或未提交嫌疑最大) | [[lab-race-conditions-partial-construction]] |
@@ -28,13 +30,20 @@ title: 竞态族:单包并发与状态窗口
 1. 先证窗口存在:并发齐发能造出**错投/超额**等可观测证据,再收窄到目标动作。
 2. 同刻到达是核心:HTTP/1.1 双连接 + JS 同 tick fetch 常落在窗口之后;
    正解是 HTTP/2 单包(参见 [[h2-smuggling-family]] 的帧工具)。
-3. 会话/串行约束:PHP 靶场会话级串行、购物车按会话,需换不同/无会话并发
+3. 邮箱 token 两句模型:确认**不消耗** token(有效 token 可反复当齐发素材);
+   change-email **轮换** token(每改一次发新值,旧 token 不复用)。泄漏正文里
+   出现 token 字样不等于拿到归属 token,以端点实收为准。
+4. 会话/串行约束:PHP 靶场会话级串行、购物车按会话,需换不同/无会话并发
    (`race_send --no-cookie-b`)。**批42 反例**:部分构造题同 session 并发全部成功(存在性检查 TOCTOU),会话并未串行化。
 
 ## 工具面
 
 - `race_send`:每 worker 预热连接、Barrier 齐发,`--url2`(异构端点)、`--stagger-ms`、`--out-dir`。
 - `race_email`:改邮箱 A/B 齐发 + 读收件箱抽 token + confirm 驱动。
+- `h2_burst`:单包多流阵形主战件(confirm+change 并放、写侧齐发皆此件;四战四胜)。
+- `h2_lbs_race`:末字节同放(last-byte-sync)单包,登录限流面 30 流齐发,流级回 302 即中。
+- `h2_req` 同连接洪泛:单包预算 ≈1400B 放不下时,同连接多轮以量补齐(120 流实证),
+  适用于计数型限流而非对齐型窗口。
 - `sha_brute`:时间派生式暴力(整数/毫秒/微秒/uniqid/日期 × user/email/pw)全未命中。
 
 ## 部分构造:硬证据与陷阱
@@ -51,8 +60,16 @@ title: 竞态族:单包并发与状态窗口
 
 - 判定锚点:竞态动作实际生效(邮箱被改、以非预期价格下单、限速被绕过);
   仅「并发完成」不算解。
-- 4 题现状:单端点/多端点/时间敏感/部分构造均 **stuck**——均已证窗口与错投,
-  卡在 HTTP/1.1 无法对齐单包窗口;下一步候选取 h2 同包件。
+- 半构造三句沉淀(partial-construction 深水轮):①空/nil token 常走独立 403 分支,「空 token 命中
+  半构造行」这条路天然不存在;②注册中间态对 confirm/login 读面均不可观测时,优先怀疑隔离级而非
+  窗口宽度;③`Connection: close` 环境下 h2 单连接多流是唯一廉价高并发读通道。
+- 半构造隔离级实证(A-4 件参调专场,2026-10-11):写侧窗口稳定复现(5×NEW/3×DUP);窗口内 login 72/72
+  fail、confirm 78/78 403,错误页与邮件回显面全闭——半构造行对一切**非变异 oracle 结构性不可见**;
+  唯一余面=变异型 oracle(使行可见的原语)。
+- 现状:单端点双解(confirm-vs-change 阵形收口)、limit-overrun 与 bypassing-rate-limits 已解;
+  时间敏感与部分构造两题余量在深水面(推导式与可见性 oracle 各见上文)。
+- 族地板带分型:写侧洪泛型 ≤32(limit-overrun 实测 25);状态窗口对齐型 ≤80
+  (single-endpoint 实测 73,含 change-vs-change 死路试错 12 阵的本征学费)。
 
 ## 相关族
 
