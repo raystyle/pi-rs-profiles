@@ -93,33 +93,33 @@ fn response_complete(buf: &[u8]) -> bool {
     false
 }
 
-fn read_response<S: Read>(s: &mut S, window_ms: u64) -> (Vec<u8>, bool) {
+fn read_response<S: Read>(s: &mut S, window_ms: u64) -> Result<(Vec<u8>, bool), String> {
     let mut out: Vec<u8> = Vec::new();
     let mut buf = [0u8; 16384];
     let start = Instant::now();
     let mut last = Instant::now();
     loop {
         match s.read(&mut buf) {
-            Ok(0) => return (out, true),
+            Ok(0) => return Ok((out, true)),
             Ok(n) => {
                 out.extend_from_slice(&buf[..n]);
                 last = Instant::now();
                 if response_complete(&out) {
-                    return (out, false);
+                    return Ok((out, false));
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
                 if !out.is_empty() && last.elapsed() >= Duration::from_millis(900) {
-                    return (out, false);
+                    return Ok((out, false));
                 }
                 if start.elapsed() >= Duration::from_millis(window_ms) {
-                    return (out, false);
+                    return Ok((out, false));
                 }
             }
-            Err(_) => return (out, true),
+            Err(e) => return Err(format!("read: {e}")),
         }
         if start.elapsed() >= Duration::from_millis(window_ms) {
-            return (out, false);
+            return Ok((out, false));
         }
     }
 }
@@ -265,7 +265,10 @@ fn fire(host: &str, port: u16, tls: bool, wire: &str, read_ms: u64) -> Fired {
         return err(format!("write: {e}"));
     }
     let t = Instant::now();
-    let (raw, eof) = read_response(&mut stream, read_ms);
+    let (raw, eof) = match read_response(&mut stream, read_ms) {
+        Ok(v) => v,
+        Err(e) => return err(format!("{e} (partial read; length excluded from clusters)")),
+    };
     let time_ms = t.elapsed().as_millis() as u64;
     if raw.is_empty() {
         let why = if eof { "connection closed with no response".to_string() } else { format!("no response within {read_ms}ms") };
