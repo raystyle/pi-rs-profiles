@@ -42,6 +42,9 @@ cookies、lab_alert、page_snapshot、page_interact、reqseq 等已升内置)。
 | `phpser.rs` | PHP 序列化手术刀:模板中 `%00` 展开为 NUL 字节(私有/保护属性名),输出 serialized/base64/可作 session cookie 的 URL-encoded base64 | 反序列化批 |
 | `bin_get.rs` | 二进制下载 + ascii run 抽取:拉取 polyglot/图片等二进制文件到盘,并列出其中可打印 ASCII 串(读 PHAR 内嵌序列化载荷) | 反序列化批 |
 | `upload.rs` | multipart/form-data 上传:二进制安全地传文件 + 普通表单字段 + jar cookie(头像/PHAR polyglot/任意文件上传靶场) | 反序列化批 |
+| `mut_oracle.rs` | 竞态半构造变异 oracle:模板({I}/{M} 占位)Barrier 齐发 N 对 + 串行基线,报串线 marker/差分簇/谓词命中,判半构造行读面可见性 | 件先行专场(kimi Swarm 铸) |
+| `duphost_probe.rs` | 双 Host 表达探针:单连接发两个可配置头,五类判定(rejected-400/first-wins/second-wins/both-reflected/other),--repeat 测稳定性 | 件先行专场(kimi Swarm 铸) |
+| `burp_interp.rs` | 拦截代理语义(客户端侧重放,非 TLS 终止):--req 原请求 + set/drop/replace/set-body 改写规则 + jar,--follow 给整链 | 件先行专场(kimi Swarm 铸) |
 
 检索:语义面走 zg(zvec-grep,fts+vector 混合);已升内置的浏览器件
 (lab_alert/page_snapshot/page_interact/reqseq+browse/cookies)在产品 catalog。
