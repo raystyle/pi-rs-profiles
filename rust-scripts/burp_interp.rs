@@ -81,6 +81,7 @@ fn unescape(s: &str) -> String {
 
 fn connect(host: &str, port: u16, tls: bool) -> Result<Box<dyn ReadWrite>, String> {
     let tcp = TcpStream::connect((host, port)).map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(Duration::from_millis(SLICE_MS)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
     if tls {
@@ -176,7 +177,9 @@ fn parse_cookie_header(value: &str) -> Vec<(String, String)> {
 fn jar_pairs(jar: &Jar, host: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (h, cookies) in jar {
-        if host == h || host.ends_with(&format!(".{h}")) || h.ends_with(host) {
+        // exact host, or a domain cookie flowing down to a subdomain (dot boundary);
+        // the bare-suffix form let notexample.com match example.com
+        if host == h || host.ends_with(&format!(".{h}")) {
             for (k, v) in cookies {
                 out.push((k.clone(), v.clone()));
             }
@@ -369,7 +372,7 @@ fn decode_chunked(body: &[u8]) -> Option<Vec<u8>> {
 fn send_and_read(host: &str, port: u16, tls: bool, bytes: &[u8], read_ms: u64) -> Result<Response, String> {
     let mut stream = connect(host, port, tls)?;
     stream.write_all(bytes).map_err(|e| format!("send: {e}"))?;
-    let _ = stream.flush();
+    stream.flush().map_err(|e| format!("flush: {e}"))?;
     let t = Instant::now();
     let (raw, eof) = read_response(&mut stream, read_ms);
     if raw.is_empty() && !eof {

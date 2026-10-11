@@ -52,6 +52,7 @@ fn unescape(s: &str) -> String {
 
 fn connect(host: &str, port: u16, tls: bool) -> Result<Box<dyn ReadWrite>, String> {
     let tcp = TcpStream::connect((host, port)).map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(Duration::from_millis(SLICE_MS)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
     if tls {
@@ -67,23 +68,24 @@ fn connect(host: &str, port: u16, tls: bool) -> Result<Box<dyn ReadWrite>, Strin
 }
 
 /// Read until the whole `window_ms` has elapsed (or EOF), collecting everything.
-fn read_window<S: Read>(s: &mut S, window_ms: u64) -> (Vec<u8>, bool) {
+/// Non-timeout IO errors surface as Err instead of masquerading as EOF.
+fn read_window<S: Read>(s: &mut S, window_ms: u64) -> Result<(Vec<u8>, bool), String> {
     let mut out: Vec<u8> = Vec::new();
     let mut buf = [0u8; 16384];
     let start = Instant::now();
     loop {
         match s.read(&mut buf) {
-            Ok(0) => return (out, true),
+            Ok(0) => return Ok((out, true)),
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
                 if start.elapsed() >= Duration::from_millis(window_ms) {
-                    return (out, false);
+                    return Ok((out, false));
                 }
             }
-            Err(_) => return (out, true),
+            Err(e) => return Err(format!("read: {e}")),
         }
         if start.elapsed() >= Duration::from_millis(window_ms) {
-            return (out, false);
+            return Ok((out, false));
         }
     }
 }
@@ -139,8 +141,10 @@ fn exchange_serial(host: &str, port: u16, tls: bool, req: &[u8], read_ms: u64) -
                 return fired_err(format!("write: {e}"));
             }
             let t = Instant::now();
-            let (raw, _) = read_window(&mut s, read_ms);
-            fired_ok(raw, t)
+            match read_window(&mut s, read_ms) {
+                Ok((raw, _)) => fired_ok(raw, t),
+                Err(e) => fired_err(e),
+            }
         }
         Err(e) => fired_err(e),
     }
@@ -169,8 +173,10 @@ fn burst(host: &str, port: u16, tls: bool, tpl: &str, total: usize, last_byte: b
                         let t = Instant::now();
                         match s.write_all(&req[hold..]).and_then(|_| s.flush()) {
                             Ok(()) => {
-                                let (raw, _) = read_window(&mut s, read_ms);
-                                fired_ok(raw, t)
+                                match read_window(&mut s, read_ms) {
+                                    Ok((raw, _)) => fired_ok(raw, t),
+                                    Err(e) => fired_err(e),
+                                }
                             }
                             Err(e) => fired_err(format!("fire: {e}")),
                         }
@@ -340,8 +346,23 @@ fn main() {
         pi_rust_lib::report::failure("mut_oracle", "--mode must be last-byte or single-packet", "last-byte holds the final byte on the barrier; single-packet writes the whole request after it");
         std::process::exit(2);
     }
-    let parsed = Url::parse(&url).unwrap_or_else(|_| Url::parse("https://invalid/").unwrap());
+    let body_part = unescape(&tpl).split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    if body_part.contains("{CL}") {
+        pi_rust_lib::report::failure("mut_oracle", "{CL} inside the request body", "{CL} is a header placeholder; in the body its own token bytes would skew the computed Content-Length. Put {CL} in the Content-Length header and let render compute it from the body");
+        std::process::exit(2);
+    }
+    let parsed = match Url::parse(&url) {
+        Ok(u) => u,
+        Err(e) => {
+            pi_rust_lib::report::failure("mut_oracle", &format!("parse url: {e}"), "give a full http(s):// url");
+            std::process::exit(2);
+        }
+    };
     let host = parsed.host_str().unwrap_or("").to_string();
+    if host.is_empty() {
+        pi_rust_lib::report::failure("mut_oracle", "url has no host", "give a full http(s):// url");
+        std::process::exit(2);
+    }
     let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
     let tls = parsed.scheme() == "https";
 

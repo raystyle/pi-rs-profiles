@@ -27,6 +27,7 @@ impl<T: Read + Write> ReadWrite for T {}
 
 fn connect(host: &str, port: u16, tls: bool) -> Result<Box<dyn ReadWrite>, String> {
     let tcp = TcpStream::connect((host, port)).map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(Duration::from_millis(SLICE_MS)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
     if tls {
@@ -42,23 +43,24 @@ fn connect(host: &str, port: u16, tls: bool) -> Result<Box<dyn ReadWrite>, Strin
 }
 
 /// Read until EOF or until `window_ms` has elapsed, collecting everything.
-fn read_window<S: Read>(s: &mut S, window_ms: u64) -> (Vec<u8>, bool) {
+/// Non-timeout IO errors surface as Err instead of masquerading as EOF.
+fn read_window<S: Read>(s: &mut S, window_ms: u64) -> Result<(Vec<u8>, bool), String> {
     let mut out: Vec<u8> = Vec::new();
     let mut buf = [0u8; 16384];
     let start = Instant::now();
     loop {
         match s.read(&mut buf) {
-            Ok(0) => return (out, true),
+            Ok(0) => return Ok((out, true)),
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
                 if start.elapsed() >= Duration::from_millis(window_ms) {
-                    return (out, false);
+                    return Ok((out, false));
                 }
             }
-            Err(_) => return (out, true),
+            Err(e) => return Err(format!("read: {e}")),
         }
         if start.elapsed() >= Duration::from_millis(window_ms) {
-            return (out, false);
+            return Ok((out, false));
         }
     }
 }
@@ -85,9 +87,12 @@ fn parse_header(spec: &str) -> Result<(String, String), String> {
     Ok((name.to_string(), value.to_string()))
 }
 
-fn build_request(path: &str, n1: &str, v1: &str, n2: &str, v2: &str) -> String {
+fn build_request(path: &str, n1: &str, v1: &str, n2: &str, v2: &str) -> Result<String, String> {
+    if path.contains('\r') || path.contains('\n') || path.contains(' ') {
+        return Err(format!("path '{path}' must not contain CR/LF/spaces (it would split the request line)"));
+    }
     let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
-    format!("GET {path} HTTP/1.1\r\n{n1}: {v1}\r\n{n2}: {v2}\r\nConnection: close\r\n\r\n")
+    Ok(format!("GET {path} HTTP/1.1\r\n{n1}: {v1}\r\n{n2}: {v2}\r\nConnection: close\r\n\r\n"))
 }
 
 fn status_line_of(text: &str) -> String {
@@ -152,8 +157,8 @@ fn probe_once(n: usize, host: &str, port: u16, tls: bool, request: &str, n1: &st
     let mut stream = connect(host, port, tls)?;
     let t = Instant::now();
     stream.write_all(request.as_bytes()).map_err(|e| format!("send request: {e}"))?;
-    let _ = stream.flush();
-    let (raw, eof) = read_window(&mut stream, read_ms);
+    stream.flush().map_err(|e| format!("flush: {e}"))?;
+    let (raw, eof) = read_window(&mut stream, read_ms)?;
     let elapsed_ms = t.elapsed().as_millis() as u64;
     let text = String::from_utf8_lossy(&raw).to_string();
     let (verdict, note) = classify(&raw, n1, n2, canary);
@@ -259,7 +264,13 @@ fn main() {
         std::process::exit(2);
     }
 
-    let request = build_request(&path_final, &n1, &v1, &n2, &v2);
+    let request = match build_request(&path_final, &n1, &v1, &n2, &v2) {
+        Ok(r) => r,
+        Err(e) => {
+            pi_rust_lib::report::failure("duphost_probe", &e, "fix --path or the header specs");
+            std::process::exit(2);
+        }
+    };
     let mut attempts: Vec<Value> = Vec::new();
     for n in 1..=repeat.max(1) {
         match probe_once(n, &host, port, tls, &request, &v1, &v2, canary, read_ms) {
@@ -341,7 +352,10 @@ fn scenario(name: &str, response: &'static [u8], h1: &str, h2: &str, path: &str,
     let out = match specs {
         Ok(((n1, v1), (n2, v2))) => {
             let canary = !marker.is_empty() && (path_r.contains(marker) || v1.contains(marker) || v2.contains(marker));
-            let request = build_request(&path_r, &n1, &v1, &n2, &v2);
+            let request = match build_request(&path_r, &n1, &v1, &n2, &v2) {
+                Ok(r) => r,
+                Err(e) => return json!({"scenario": name, "expected": expected, "error": e, "pass": false}),
+            };
             probe_once(1, "127.0.0.1", port, false, &request, &v1, &v2, canary, 4000).map(|v| {
                 let got = captured.lock().expect("lock captured").clone();
                 let got_text = String::from_utf8_lossy(&got).to_string();
