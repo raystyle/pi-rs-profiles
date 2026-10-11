@@ -30,15 +30,28 @@ Academy 的 h2 前端(h2→h1 降级)在 request tunnelling 题里**每个注入
 - 方法族:[[h2-tunnelling-and-h2cl-practice]]、[[request-smuggling-family]];题面级数值与帧形见 [[portswigger-platform-specifics]]。
 
 
-## 记账 oracle 的两条实测增量(批49 蒸馏)
+## 记账 oracle 增量
 
 - **M 是逐 path 常数,可预取**:`500 Received only N of expected M` 的 M 是
   该外层 path 自身响应长(/admin=2776、/=8811 本实例)——先 http_dump 取 M
   再谈切法,不必试错。
-- **读回看不见前端自己追加的头块**:隧道回显给的是内层请求/响应字节,
-  X-SSL-* 类前端追加头不落进可见 body(M 与交付长的差里也读不到)⇒ 信任位
-  来路不能靠回显判定,只能用状态/长度分叉;X-SSL-* 的合法来路是 TLS 层,
-  HTTP 客户端不可得 ⇒ 该凭据行记死,不再磨头名变形。
+- **追加块的可读面只有搜索体回显**:内层响应原文隧道里读不到追加块(M 与交付长的差里也没有);唯一的可读面是「外层 `POST` + `search=` 未闭合体」的搜索页 body 回显。
+
+## h1 装配顺序(逐字节实测)
+
+前端把 h2 请求降级成 h1 时按固定模板拼:
+`{method} {path} HTTP/1.1` + `\r\nHost: <authority>` + [客户端 h2 头字段,逐条 `\r\n{name}: {value}`] + `\r\nX-SSL-VERIFIED: 0\r\nX-SSL-CLIENT-CN: null\r\nX-FRONTEND-KEY: <9 位>` + `\r\n\r\n`。
+⇒ 追加块**永远最后**;客户端头字段与 `:path` 注入字节都排在它**之前**。加一个客户端字段 `Foo: BBB…` 再用搜索体回显,即可把顺序逐字节读出(` HTTP/1.1\r\nHost: <authority>\r\nFoo: …\r\nX-SSL-VERIFIED: 0…`)。
+
+## 信任块不是 ACL 判据(face-3 终判)
+
+「头/正文再分类」能把追加块整体搬进 body(注入自收尾头块 + `Content-Length` = 块长;本实例 authority 57 ⇒ 约 149B),搜索体回显给出密钥;但把块搬出头部后打 `/admin` **仍 401 / 2776**,与基线逐字节相同。穷举否证:
+
+- 自带三行(经 `:path` 或经客户端 h2 字段)、20 条转发/URL 类头电池、`Host: localhost`、名字变体(尾随空格/制表/小写)全 401;
+- H2.CL 形(`POST /admin` + `content-length: 0` + DATA 携内层 `GET /admin`)亦 401;
+- 带三行打 `/my-account` 仍 302 `/login` ⇒ X-SSL-* 不携带身份;本实例 `/login` 拒绝 `wiener:peter`。
+
+⇒ 该题 `/admin` 的判据是身份/会话,不在前端追加块上;信任位「不可伪造/不可借用」应改读为**根本不在 ACL 路径上**。头名变形与再分类到此为止。
 
 ## 追加头块可整体泄漏(密钥可读)
 
