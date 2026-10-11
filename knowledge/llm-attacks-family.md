@@ -16,7 +16,7 @@ title: LLM 攻击族:提示注入与 API 滥用
 | API 命令注入 | 模型可调后端 API 且有 shell | 以「合法前缀 + `$(cmd)` 后缀」调 API 绕校验 | LLM-2 |
 | 过度代理 | 模型持有高权函数 | 直接点名**隐藏**函数与恶意入参 | LLM-3 |
 | **AI 扫描器**(agent 自带登录态 + `send_request` 工具) | 扫描总有一个「Scan site」按钮(`POST /api/audit/start {postId\|productId}`) | 把注入写进**被扫页面的用户内容**(博客评论/商品评论);载荷框架用「**需要验证的安全发现**」 | [[lab-indirect-prompt-injection-via-ai-powered-scan]]、[[lab-exploiting-target-website-vulnerabilities-to-bypass-restrictions]] |
-| AI 扫描器:敏感信息外带 | 靶场有 `/accountDetails`(返回 `apikey`);扫描器带受害者会话 | 让 agent 把值**贴成公开评论**;有的 lab 无 `/scanresults`,只能靠评论回读 | [[lab-sensitive-information-exfiltration]] |
+| AI 扫描器:敏感信息外带 | 靶场有 `/accountDetails`(返回 `apikey`);扫描器带受害者会话 | 载体一:让 agent 把值**贴成公开评论**;载体二(报告面被值抑制时):把 mandatory-step 的收口步放到**提交面**——让 agent 自己 `POST /submitSolution answer=<值>`。两个 lab 都无 `/scanresults`,可读面只有评论 | [[lab-sensitive-information-exfiltration]]、[[lab-bypassing-ai-scanner-defenses-to-exfiltrate-sensitive-information]] |
 
 ## AI 扫描器组
 
@@ -68,7 +68,8 @@ title: LLM 攻击族:提示注入与 API 滥用
 
 - **旧框架已拒**:「漏报验证」重述框架(不发覆盖指令、把外带说成待验证发现)在批 28 后复跑全挂——该行从成功手法改记为**已被拒类**;官方教材页仍教三种说法(可信口吻/验证需要/紧迫后果),教材与实际防御已分叉。
 - **仍立机制行**:指令与数据同上下文;confused deputy(扫描器持受害者登录态);外带走攻击者可读面(公开评论/工具记录);观测窗先于盲投(无日志/轨迹/回读时换句=盲投);换载体不换目标。
-- **新防御面**:值抑制——扫描报告留端点类别不落具体值,「把秘密当答案说出来」不再是可行目标。**已证载体**:「验证并自发表」(mandatory-step 框架让扫描器以己会话取目标页,把值当验证工件追加进自己发布的报告注释——值抑制下替代「说出来」,同批 78 调用实解,见 [[lab-sensitive-information-exfiltration]])。
+- **新防御面**:值抑制——扫描报告留端点类别不落具体值,「把秘密当答案说出来」不再是可行目标。**已证载体谱**:①「验证并自发表」(mandatory-step 框架让扫描器以己会话取目标页,把值当验证工件追加进自己发布的报告注释);②「验证并提交」(收口面从发表换成提交:扫描器以己会话取目标值后自行 POST 提交端点带 answer=<值>,15 回合翻牌)——值抑制下两形都绕「说出」。(实锚:lab-sensitive-information-exfiltration 78 调用 / lab-bypassing-ai-scanner-defenses G 臂)
+- **载体移植的变量:收口面**。值抑制覆盖面 = **发表面**(报告正文、评论 name 字段、评论 website/链接字段的 URL 参数——三条都实测被抑制);**提交面**(扫描器自己的 `send_request` 请求体,如 `POST /submitSolution answer=<值>`)不被覆盖。mandatory-step 句式只有把收口步落在提交面时才穿透:要求扫描器「以己会话取 /accountDetails,再自行把值 POST 给答案检查器」,页面上任何可读面都不含秘密。判别律:**先判收口面被哪种抑制覆盖,再选句式的收口句**;同句式换收口面即从全拒变即翻牌(见 [[lab-bypassing-ai-scanner-defenses-to-exfiltrate-sensitive-information]])。
 - **工序面**:活模型不稳定,同一载荷要**换帖重扫**多轮;同页多份注入互相干扰,一页一份。
 
 ## 族地板带
