@@ -224,7 +224,9 @@ fn apply_setcookies(jar: &mut Jar, host: &str, pairs: &[(String, String)]) -> bo
     }
     let key = jar
         .keys()
-        .find(|h| **h == host || host.ends_with(&format!(".{h}")) || h.ends_with(host))
+        // exact host, or a domain cookie flowing down to a subdomain (dot boundary);
+        // the bare-suffix form let example.com write into a notexample.com key
+        .find(|h| **h == host || host.ends_with(&format!(".{h}")))
         .cloned()
         .unwrap_or_else(|| host.to_string());
     let entry = jar.entry(key).or_default();
