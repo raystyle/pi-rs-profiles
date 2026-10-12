@@ -1,8 +1,8 @@
 #!/usr/bin/env rust-script
 //! name: ts_brute
 //! description: Exhaustive microsecond-window token forger for time-sensitive reset tokens - sweeps an explicit [--us-lo, --us-hi] microsecond window across a rich battery (time encodings x identity placements x strategies: plain sha1, double sha1, HMAC with user/email/password/time/secret as key, big-endian packed second/microsecond prefixes, optional salt prefixes) and returns every (form, place, strategy, us) whose digest equals the target, so the exact timestamp and construction of a time-derived token are recovered from one known token. Digests are compared as raw bytes to keep the sweep allocation-free.
-//! version: 1.0.1
-//! args: <token> --user U [--email E] [--pw P] [--csrf C] --us-lo N --us-hi N [--threads N] [--forms all|a,b] [--places all|a,b] [--strats all|a,b] [--salts none|secret,wasp] [--selftest]
+//! version: 1.1.0
+//! args: <token> --user U [--email E] [--pw P] [--csrf C] --us-lo N --us-hi N [--step-us N 1000=毫秒栅格,校准大时钟偏移] [--threads N] [--forms all|a,b] [--places all|a,b] [--strats all|a,b] [--salts none|secret,wasp] [--selftest]
 //! keywords: reset token, time-sensitive, microsecond, HMAC, 时间敏感, race, broken cryptography, token 伪造
 //!
 //! ```cargo
@@ -15,7 +15,7 @@
 use pi_rust_lib::report;
 use pi_rust_lib::serde_json::{json, Value};
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Sha256, Sha512};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +35,17 @@ fn sha1_digest(parts: &[&[u8]]) -> D20 {
 
 fn sha256_20(parts: &[&[u8]]) -> D20 {
     let mut h = Sha256::new();
+    for p in parts {
+        h.update(p);
+    }
+    let out = h.finalize();
+    let mut d = [0u8; 20];
+    d.copy_from_slice(&out[..20]);
+    d
+}
+
+fn sha512_20(parts: &[&[u8]]) -> D20 {
+    let mut h = Sha512::new();
     for p in parts {
         h.update(p);
     }
@@ -275,7 +286,7 @@ fn place_into(buf: &mut String, place: &str, user: &str, email: &str, pw: &str, 
     }
 }
 
-const PLACE_STRATS: &[&str] = &["plain", "double", "hmac_ku", "hmac_ke", "hmac_secret", "hmac_kpw", "sha256", "sha256d"];
+const PLACE_STRATS: &[&str] = &["plain", "double", "hmac_ku", "hmac_ke", "hmac_secret", "hmac_kpw", "sha256", "sha256d", "sha512"];
 const FREE_STRATS: &[&str] = &["hmac_kt", "hmac_ktu", "packN", "packN_us", "us_packN"];
 
 fn place_digest(strat: &str, x: &[u8], user: &[u8], email: &[u8], pw: &[u8]) -> D20 {
@@ -294,6 +305,7 @@ fn place_digest(strat: &str, x: &[u8], user: &[u8], email: &[u8], pw: &[u8]) -> 
             let inner = sha256_20(&[x]);
             sha256_20(&[&inner])
         }
+        "sha512" => sha512_20(&[x]),
         _ => [0u8; 20],
     }
 }
@@ -450,6 +462,7 @@ fn run(args: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
+    let step: u64 = kv.get("--step-us").and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
     let total = us_hi - us_lo + 1;
     let hits: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let tested = Arc::new(AtomicUsize::new(0));
@@ -457,11 +470,13 @@ fn run(args: &[String]) -> Result<(), String> {
     let start = std::time::Instant::now();
     let mut handles = Vec::new();
     for tid in 0..threads {
-        let from = us_lo + tid as u64 * chunk;
-        if from > us_hi {
+        let raw_from = us_lo + tid as u64 * chunk;
+        if raw_from > us_hi {
             break;
         }
-        let to = (from + chunk - 1).min(us_hi);
+        // align each thread's start up onto the sampling grid so the union of chunks is exactly the grid
+        let from = us_lo + (raw_from - us_lo).div_ceil(step) * step;
+        let to = (raw_from + chunk - 1).min(us_hi);
         let (user, email, pw, csrf) = (user.clone(), email.clone(), pw.clone(), csrf.clone());
         let (forms, places, pstrats, fstrats, salts) =
             (forms.clone(), places.clone(), pstrats.clone(), fstrats.clone(), salts.clone());
@@ -474,7 +489,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let mut tbuf = String::with_capacity(64);
             let mut xbuf = String::with_capacity(256);
             let mut sbuf = String::with_capacity(320);
-            for us in from..=to {
+            for us in (from..=to).step_by(step as usize) {
                 let sec32 = (us / 1_000_000) as u32;
                 for form in &forms {
                     time_into(&mut tbuf, form, us);
@@ -540,7 +555,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let hits = hits.lock().unwrap().clone();
     let data = json!({
         "token": token, "user": user, "email": email,
-        "us_lo": us_lo, "us_hi": us_hi, "span": total, "threads": threads,
+        "us_lo": us_lo, "us_hi": us_hi, "span": total, "step_us": step, "threads": threads,
         "forms": forms, "places": places, "place_strats": pstrats, "free_strats": fstrats,
         "salts": salts, "tested": tested.load(Ordering::Relaxed),
         "hits": hits, "elapsed_ms": start.elapsed().as_millis() as u64,

