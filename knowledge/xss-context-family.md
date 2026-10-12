@@ -30,6 +30,8 @@ PortSwigger XSS context 题的通用判定/利用模式:先探照射点与编码
 
 - evidences: [[javascript-url-payload-when-parentheses-are-stripped]]
 
+关联:[[oob-callback-family]](Collaborator 零回调判读先问 bot 活动面)、host-header 族注的消费者追踪法(日志早列消费者清单,本节从渲染面立论,互补)。
+
 ## 错径写入与日志渲染面(sn 谱系,2026-10-13 非过拟合蒸馏)
 
 - **错误响应可以是写入信号**:把载荷置入某槽后恒定 500/4xx 不等于该槽封死——先问这个错误路径有没有副作用(请求日志、审计记录、失败登录表)。判死前的伪像审计行应加「错误路径副作用」一项。
