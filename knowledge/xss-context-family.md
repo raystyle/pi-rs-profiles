@@ -29,3 +29,10 @@ PortSwigger XSS context 题的通用判定/利用模式:先探照射点与编码
 ## Links
 
 - evidences: [[javascript-url-payload-when-parentheses-are-stripped]]
+
+## 错径写入与日志渲染面(sn 谱系,2026-10-13 非过拟合蒸馏)
+
+- **错误响应可以是写入信号**:把载荷置入某槽后恒定 500/4xx 不等于该槽封死——先问这个错误路径有没有副作用(请求日志、审计记录、失败登录表)。判死前的伪像审计行应加「错误路径副作用」一项。
+- **日志渲染面是标准存储 XSS 位**:/admin/logs、audit、recent-activity 类端点若未转义渲染日志,任何被记录的输入(含会话 cookie 的结构半)即注入面;枚举隐藏端点时 logs/audit 类子路径优先。
+- **受害者 bot 的活动面决定盲载荷命中**:bot 不逛首页评论区也可能逛管理日志页;Collaborator 零回调时先问「bot 到底逛哪」,UA 特征(Mozilla/5.0 (Victim))与 Referer 可从交互反推。
+- 通用链:槽载荷→错误路径写入→日志页渲染→bot 执行→Collaborator 外带会话→重放提权。零题绑:四步各自由现有件覆盖(http_session、burp_collab、banner_verdict)。
