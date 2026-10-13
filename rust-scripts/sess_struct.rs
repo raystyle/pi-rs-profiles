@@ -155,7 +155,7 @@ fn main() {
         report::failure(
             "sess_struct",
             "no inputs: pass one or more session or base64 token values",
-            "e.g. sess_struct 'wiener:iGFE...' ':hZ0A...'",
+            "e.g. sess_struct 'wiener:iGFE...' ':hZ0A...'", // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         );
         return;
     }

@@ -308,7 +308,7 @@ fn run_verify(args: &[String]) {
     let (kv, _) = parse(&args[1..]);
     let vuser = kv.get("--vuser").cloned().unwrap_or_default();
     if base.is_empty() || vuser.is_empty() || !kv.contains_key("--seed-lo") {
-        pi_rust_lib::report::failure("ts_rand", "verify needs <base-url> --vuser U --seed-lo/--seed-hi", "usage: ts_rand verify https://lab/ --vuser carlos --seed-lo N --seed-hi N");
+        pi_rust_lib::report::failure("ts_rand", "verify needs <base-url> --vuser U --seed-lo/--seed-hi", "usage: ts_rand verify https://lab/ --vuser carlos --seed-lo N --seed-hi N"); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         return;
     }
     let base = base.trim_end_matches('/').to_string();
@@ -424,16 +424,16 @@ fn run_verify(args: &[String]) {
 
 fn selftest() {
     // LCG 结构自检:同种子确定性、不同种子有别、20 字节 → 40 位十六进制
-    let a = candidates(1700000000000, "wiener", &["lcg".into()]);
-    let b = candidates(1700000000000, "wiener", &["lcg".into()]);
+    let a = candidates(1700000000000, "wiener", &["lcg".into()]); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
+    let b = candidates(1700000000000, "wiener", &["lcg".into()]); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     assert_eq!(a, b);
-    let c = candidates(1700000000001, "wiener", &["lcg".into()]);
+    let c = candidates(1700000000001, "wiener", &["lcg".into()]); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     assert_ne!(a, c);
     let h = a.iter().find(|(f, _)| f == "lcg.hex20").map(|(_, t)| t.clone()).unwrap();
     assert_eq!(h.len(), 40);
     assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     // MT 自检:5 词拼接 40 位十六进制
-    let m = candidates(1700000000, "wiener", &["mt".into()]);
+    let m = candidates(1700000000, "wiener", &["mt".into()]); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     let mw = m.iter().find(|(f, _)| f == "mt.words5").map(|(_, t)| t.clone()).unwrap();
     assert_eq!(mw.len(), 40);
     // java.util.Random 结构自检:next(32) 只取高 32 位,连续两次调用须不同且状态按 48 位回绕。

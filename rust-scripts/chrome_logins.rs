@@ -70,7 +70,7 @@ fn main() {
     }
 
     if db.is_empty() {
-        pi_rust_lib::report::failure("chrome_logins", "missing Login Data path", "call as: chrome_logins <profile>/Default/Login Data [--host portswigger]");
+        pi_rust_lib::report::failure("chrome_logins", "missing Login Data path", "call as: chrome_logins <profile>/Default/Login Data [--host portswigger]"); // binding-exempt: documentation example domain in usage text, not a binding
         std::process::exit(2);
     }
 

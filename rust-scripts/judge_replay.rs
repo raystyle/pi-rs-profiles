@@ -273,7 +273,7 @@ fn main() {
                 report::failure(
                     "judge_replay",
                     &format!("bad --case spec: {r}"),
-                    "use <lab>:<arm>:<run>, e.g. lab-frame-buster-script:A:2",
+                    "use <lab>:<arm>:<run>, e.g. lab-frame-buster-script:A:2", // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
                 );
                 std::process::exit(2);
             }

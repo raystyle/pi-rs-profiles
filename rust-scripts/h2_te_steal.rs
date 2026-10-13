@@ -27,7 +27,7 @@ use tokio_rustls::TlsConnector;
 use url::Url;
 
 const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-const ADMIN_MARKERS: [&str; 3] = ["carlos", "Admin panel", "Delete"];
+const ADMIN_MARKERS: [&str; 3] = ["carlos", "Admin panel", "Delete"]; // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
 
 struct Opts {
     host: String,

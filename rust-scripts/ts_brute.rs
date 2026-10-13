@@ -370,9 +370,9 @@ fn run(args: &[String]) -> Result<(), String> {
         let mut t = String::new();
         time_into(&mut t, "us_int", us);
         let mut x = String::new();
-        place_into(&mut x, "u_t", "wiener", "w@x", "peter", "c", &t);
+        place_into(&mut x, "u_t", "wiener", "w@x", "peter", "c", &t); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         let want = hex::encode(sha1_digest(&[x.as_bytes()]));
-        let got = hex::encode(place_digest("plain", x.as_bytes(), b"wiener", b"w@x", b"peter"));
+        let got = hex::encode(place_digest("plain", x.as_bytes(), b"wiener", b"w@x", b"peter")); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         let mut ok = want == got && !want.is_empty();
         let mut p = String::new();
         php_g_into(1_791_665_429.123456, 14, &mut p);

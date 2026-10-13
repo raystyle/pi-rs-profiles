@@ -657,29 +657,29 @@ fn mode_sweep(
 fn selftest() {
     let mut ok = sha1_hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d";
     let t = tmpl_by_name("f6u1").expect("template");
-    ok &= render(&t, 1_760_126_748_123_456, "wiener", "w@x") == "wiener1760126748.123456";
+    ok &= render(&t, 1_760_126_748_123_456, "wiener", "w@x") == "wiener1760126748.123456"; // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     let t2 = tmpl_by_name("f9u0").expect("template");
-    ok &= render(&t2, 1_760_126_748_123_456, "wiener", "w@x") == "0.12345600 1760126748";
+    ok &= render(&t2, 1_760_126_748_123_456, "wiener", "w@x") == "0.12345600 1760126748"; // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     ok &= php_g(1_791_665_429.0, 14) == "1791665429";
     ok &= php_g(1_791_665_429_123_456.0, 14) == "1.7916654291235E+15";
     ok &= php_g(1_791_665_429.123_456, 14) == "1791665429.1235";
-    let mail = "<tr><td>2026-10-10 20:45:48 +0000</td><td>wiener@x</td><td>no-reply@y</td><td>Account recovery</td><td><pre><a href='https://z/forgot-password?user=wiener&token=df65c59740540415a221dca4a0e9a146f2cda38a'>l</a></pre></td></tr>";
-    let rows = parse_mail(mail, "wiener");
+    let mail = "<tr><td>2026-10-10 20:45:48 +0000</td><td>wiener@x</td><td>no-reply@y</td><td>Account recovery</td><td><pre><a href='https://z/forgot-password?user=wiener&token=df65c59740540415a221dca4a0e9a146f2cda38a'>l</a></pre></td></tr>"; // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
+    let rows = parse_mail(mail, "wiener"); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     ok &= rows.len() == 1 && rows[0].1 == "df65c59740540415a221dca4a0e9a146f2cda38a" && rows[0].0 == 1_791_665_148;
     // Crack self-check: mint a token from a known form at a known microsecond, then require the
     // matcher to rediscover the value inside a synthetic round record.
     let us: u64 = 1_791_666_000_123_456;
     let t0 = tmpl_by_name("f0u1").expect("template");
-    let synthetic = sha1_hex(&render(&t0, us, "wiener", "wiener@x"));
+    let synthetic = sha1_hex(&render(&t0, us, "wiener", "wiener@x")); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     let rec = json!({
-        "user": "wiener",
+        "user": "wiener", // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         "email_url": "https://x/email",
         "rounds": [{"token": synthetic, "sent_epoch": 1_791_666_000, "t_before_us": us, "t_after_us": us + 1000}]
     });
     std::fs::write("/tmp/rt_selftest.json", rec.to_string()).expect("write");
     let got = mode_crack(Some("/tmp/rt_selftest.json".to_string()), None, 5000, Some("f0u1".to_string()), false);
     ok &= got["hits"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
-    let payload = json!({"ok": ok, "rows": rows.len(), "render": render(&t, 1_760_126_748_123_456, "wiener", "w@x"), "php_g": php_g(1_791_665_429_123_456.0, 14), "synthetic_crack": got});
+    let payload = json!({"ok": ok, "rows": rows.len(), "render": render(&t, 1_760_126_748_123_456, "wiener", "w@x"), "php_g": php_g(1_791_665_429_123_456.0, 14), "synthetic_crack": got}); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     if ok {
         report::success("reset_time_probe", payload, "run: rounds <base> --user U --email URL --out /tmp/rt.json, then crack --in /tmp/rt.json")
             .expect("report");
@@ -754,7 +754,7 @@ fn main() {
             mode_pairrace(
                 &base,
                 &opt("--user").unwrap_or_default(),
-                &opt("--target").unwrap_or_else(|| "carlos".to_string()),
+                &opt("--target").unwrap_or_default(), // de-bound: no baked-in usernames; pairrace requires --target
                 &opt("--email").unwrap_or_default(),
                 opt_n("--n", 16) as usize,
                 opt_n("--rounds", 1) as usize,

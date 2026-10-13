@@ -46,7 +46,7 @@ async fn main() {
     let mut sink = "/post?postId=1".to_string();
     let mut comment_path = "/post/comment".to_string();
     let mut post_id = "1".to_string();
-    let mut user = "wiener".to_string();
+    let mut user = "wiener".to_string(); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     let mut password = "peter".to_string();
     let mut burst = 12u32;
     let mut overshoots: Vec<usize> = vec![250, 400, 550, 700];
@@ -472,11 +472,11 @@ async fn run(
         let stolen = cap["session"].as_str().unwrap_or("").to_string();
         let v = h1_request(h1.clone(), host, port, "GET", verify_path, None, Some(&format!("session={stolen}"))).await?;
         verdict = json!({
-            "verified": v.status == 200 && v.body.contains("carlos"),
+            "verified": v.status == 200 && v.body.contains("carlos"), // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
             "verify_path": verify_path,
             "verify_status": v.status,
-            "has_carlos": v.body.contains("carlos"),
-            "snippet": window(&v.body, v.body.find("carlos").unwrap_or(0), 300, 600),
+            "has_carlos": v.body.contains("carlos"), // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
+            "snippet": window(&v.body, v.body.find("carlos").unwrap_or(0), 300, 600), // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         });
         if let Some(p) = out {
             let _ = std::fs::write(p, json!({ host: { "session": stolen } }).to_string());

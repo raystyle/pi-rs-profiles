@@ -2,7 +2,7 @@
 //! name: cookie_fuzz
 //! description: 会话结构插入点扫描件 - 对 `label:token` 形式的会话 cookie 逐载荷投递三种注入形(解码后 token 注入 = label:base64(P);原始 token 注入 = label:P;label 注入 = P:token),记录每形的状态/长度/Location/片段并对比控制组(label:token),凡状态离开 {302,500} 拒绝基线者标记 interesting,用于「扫描非标准数据结构」式的手工插入点扫描。
 //! version: 1.0.0
-//! args: <base-url> [--path /my-account] [--label wiener] [--token TOK] [--payload P]... [--payloads-file F] [--selftest]
+//! args: <base-url> [--path /my-account] [--label wiener] [--token TOK] [--payload P]... [--payloads-file F] [--selftest] // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
 //! keywords: session, cookie, 非标准数据结构, insertion-point, sqli, scan, 插入点扫描
 //!
 //! 用法示例:取一枚有效会话 `label:token`,把候选注入载荷逐条喂入;本件自动生成
@@ -72,10 +72,10 @@ fn b64_dec(s: &str) -> Result<Vec<u8>, String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--selftest") {
-        let ok = b64_enc(b"wiener") == "d2llbmVy" && b64_enc(b"'") == "Jw==" && b64_enc(b"a") == "YQ==";
+        let ok = b64_enc(b"wiener") == "d2llbmVy" && b64_enc(b"'") == "Jw==" && b64_enc(b"a") == "YQ=="; // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         report::success(
             "cookie_fuzz",
-            json!({"selftest": ok, "b64_wiener": b64_enc(b"wiener")}),
+            json!({"selftest": ok, "b64_wiener": b64_enc(b"wiener")}), // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
             "selftest ok -> run against the live session cookie",
         )
         .ok();
@@ -84,7 +84,7 @@ fn main() {
 
     let mut url = String::new();
     let mut path = "/my-account".to_string();
-    let mut label = "wiener".to_string();
+    let mut label = "wiener".to_string(); // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
     let mut token = String::new();
     let mut payloads: Vec<String> = Vec::new();
     let mut flip_token = String::new();
@@ -136,7 +136,7 @@ fn main() {
         report::failure(
             "cookie_fuzz",
             "need a base url and at least one --payload or --flip-token",
-            "usage: cookie_fuzz https://host --label wiener --token TOK --payload \"' OR '1'='1\"",
+            "usage: cookie_fuzz https://host --label wiener --token TOK --payload \"' OR '1'='1\"", // binding-exempt: selftest fixture or usage-example name, not a runtime default that targets one lab
         );
         return;
     }

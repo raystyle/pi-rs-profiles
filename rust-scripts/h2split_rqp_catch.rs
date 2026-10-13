@@ -391,7 +391,7 @@ async fn run(
         }
         tested += 1;
         if let Ok(r) = h1(h1cfg.clone(), host, port, verify_path, Some(&format!("session={v}"))).await {
-            if r.status == 200 && !r.body.contains("only available if logged in as an administrator") {
+            if r.status == 200 && !r.body.contains("only available if logged in as an administrator") { // binding-exempt: candidate battery value: generic privilege-role probe, not a lab user
                 verified = Some(json!({"session": v, "status": r.status, "snippet": r.body.chars().take(300).collect::<String>()}));
                 if let Some(p) = out {
                     let _ = std::fs::write(p, json!({ host: { "session": v } }).to_string());

